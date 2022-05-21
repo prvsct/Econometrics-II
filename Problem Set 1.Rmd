@@ -1,0 +1,134 @@
+---
+title: "Problem Set 1"
+author: "Pedro Scatimburgo"
+date: "26/05/2022"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preamble
+
+In this problem set, I use the ``tidyverse`` package for easier data wrangling. I also define a ``path`` object that I use to load and save files from the Problem Set 1 folder. I load ``data_gdp_brazil.csv`` and then change the name of its columns to make the coding easier.
+
+```{r}
+# ---- Clears the environment ----
+
+rm(list=ls())
+
+# ---- Loads some packages ----
+
+library(tidyverse)
+
+# ---- Defines path and loads main file ----
+
+# Defines path
+path <- "C:\\Users\\psrov\\OneDrive - Fundacao Getulio Vargas - FGV\\Documentos\\EESP\\Disciplinas\\2 Tri\\Econometrics II\\Problem Sets\\Problem Set 1\\"
+
+# Loads data_gdp_brazil
+data_gdp_brazil <- readr::read_csv(paste0(path,"data\\data_gdp_brazil.csv"))
+
+# Changes col names
+colnames(data_gdp_brazil) <- c("data","gdp")
+
+```
+
+Now I will create the ``xts`` object instead of the original ``data_gdp_brazil`` as recommended. I will name it ``df_xts``.
+
+```{r}
+df_xts <- xts::xts(x = data_gdp_brazil$gdp,
+                   order.by = as.Date(x = as.character(data_gdp_brazil$data), format = "%Y"))
+```
+
+
+# Question 1
+
+We have to report several objects for a total of eight models. I will loop the same code iterating over a vector that indicates which model I am estimating. This will be the ``models`` object, a list of vectors.
+
+```{r}
+# Creates list of models
+models <- list(
+  c(1,0,0),
+  c(2,0,0),
+  c(0,0,1),
+  c(0,0,2),
+  c(1,0,1),
+  c(2,0,1),
+  c(1,0,2),
+  c(2,0,2)
+)
+
+# Creates a vector with the name of each model to make output more intuitive
+models_names <- c("AR(1)","AR(2)","MA(1)","MA(2)","ARMA(1,1)","ARMA(2,1)","ARMA(1,2)","ARMA(2,2)")
+
+# Creates a colorblind-friendly palette for the plot, which we will create later
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+```
+
+Now I will iterate over each element of ``models``. To report the objects asked in item a), I will use the function ``coeftest`` of package ``lmtest``. To report the objects asked in item b), I will use functions ``AIC`` and ``BIC``. To plot the forecast asked in item c) I will use ``ggplot``.
+
+```{r}
+
+for(i in 1:length(models)){
+  
+  # Indicates which model we are estimating
+  cat(paste0("RESULTS FOR THE ",models_names[i]," MODEL:\n"))
+  
+  # Estimates the model, save in object model and reports objects
+  model <- arima(x = df_xts, order = models[[i]], include.mean = T)
+  print(lmtest::coeftest(model))
+  cat(paste0("AIC: ",AIC(model)),"\n")
+  cat(paste0("BIC: ",BIC(model)),"\n")
+  
+  # Forecasts
+  forecast <- predict(object = model, n.ahead = 10)
+  
+  # Creates and fills df_plot with the predicted values
+  # This is a small waste of processing power because except for forecast,
+  # none of this needs to be iterated
+  df_plot <- data.frame(
+    "year" = 2000:2030,
+    "gdp_growth" = c(data_gdp_brazil$gdp[data_gdp_brazil$data >= 2000], rep(NA,10)),
+    "forecast" = c(rep(NA,21),forecast$pred),
+    "CI_U" = c(rep(NA, 21), forecast$pred + qnorm(1 - 0.05/2) * forecast$se),
+    "CI_L" = c(rep(NA, 21), forecast$pred + qnorm(0.05/2) * forecast$se)
+  )
+  
+  # Creates the plot
+  plot_forecast <- ggplot(data = df_plot, aes(x = year)) +
+    geom_line(aes(y = gdp_growth, color = "Realized")) +
+    geom_line(aes(y = forecast, color = "Forecasted")) +
+    geom_line(aes(y = CI_U), color = "#85C0F9", linetype = "dashed") +
+    geom_line(aes(y = CI_L), color = "#85C0F9", linetype = "dashed") +
+    scale_x_continuous(
+      limits = c(2000, 2031),
+      expand = c(0,0),
+      breaks = seq(from = 2000, to = 2030, by = 5)
+    ) +
+    scale_color_manual(
+      "Legend", values=cbPalette
+    ) +
+    theme_bw(base_size = 10) +
+    labs(title = paste0("Forecasts using ",models_names[i])) +
+    xlab("Year") +
+    ylab("Value")
+  
+  # Prints the plot
+  # We use suppressWarnings because ggplot will tell us it remove NA values
+  # This happens because we have created df_plot with intentional NA rows
+  suppressWarnings(print(plot_forecast))
+}
+
+```
+
+### Among these eight models, which one would you choose as the best model? Explain your choice.
+
+I would choose ``ARMA(2,1)`` as the best model. Among all the models, ``ARMA(2,1)`` and ``ARMA(1,2)`` returned the smallest p-values for the estimated coefficientes. However, ``ARMA(2,1)`` have the smaller AIC and BIC between these two. 
+
+# Question 2
+
