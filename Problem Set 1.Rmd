@@ -27,6 +27,7 @@ library(quantmod)
 library(doParallel)
 library(gganimate)
 library(transformr)
+library(latex2exp)
 
 # ---- Defines path and loads main file ----
 
@@ -137,3 +138,3022 @@ I would choose ``ARMA(2,1)`` as the best model. Among all the models, ``ARMA(2,1
 
 # Question 2
 
+In this question I will follow the step-by-step outlined in code ``code03_MC-ma1.R``. Firstly I will set some paramethers:
+
+```{r}
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(211216)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+
+```
+
+## Intercept estimator of $Y_t = c + \theta \epsilon_{t-1} + \epsilon_t$, where $c=0$, $\theta = 0.5$ and $\epsilon_t$ is i.i.d. $N(0,1)$ or i.i.d. $exp(1)$.
+
+### Normal Distribution
+
+We have $\theta = 0.5$. Let's start with the normal distribution:
+
+```{r}
+theta = 0.5
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an MA(1) model
+    ma1 <- arima(
+      x = Y,
+      order = c(0, 0, 1),
+      include.mean = TRUE
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the intercept is ma1$coef[2]
+    resultsT$bias[m] <- ma1$coef[2] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the intercept is ma1$var.coef[2,2]
+    resultsT$normalized_coef[m] <- (ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec,
+  "delta1" = rep(NA, length(capT_vec)),
+  "delta2" = rep(NA, length(capT_vec)),
+  "delta3" = rep(NA, length(capT_vec)),
+  "delta4" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(temp, aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in distribution of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec,
+  "rej" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+suppressWarnings(print(gg))
+
+```
+
+### Expontential Distribution
+
+We have $\theta = 0.5$. But now $g = 0$.
+
+```{r}
+theta = 0.5
+g = 0
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(211216)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an MA(1) model
+    ma1 <- arima(
+      x = Y,
+      order = c(0, 0, 1),
+      include.mean = TRUE
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the intercept is ma1$coef[2]
+    resultsT$bias[m] <- ma1$coef[2] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the intercept is ma1$var.coef[2,2]
+    resultsT$normalized_coef[m] <- (ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec,
+  "delta1" = rep(NA, length(capT_vec)),
+  "delta2" = rep(NA, length(capT_vec)),
+  "delta3" = rep(NA, length(capT_vec)),
+  "delta4" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(temp, aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in distribution of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec,
+  "rej" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 1)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+```
+
+## Intercept estimator of $Y_t = c + \phi \epsilon_{t-1} + \epsilon_t$, where $c=0$, $\phi = 0.3$ and $\epsilon_t$ is i.i.d. $N(0,1)$ or i.i.d. $exp(1)$.
+
+To keep things organized, I will clean the environment before each model.
+
+```{r}
+rm(list=ls())
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(211216)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+```
+
+
+### Normal Distribution
+
+We have $\phi = 0.3$. Let's start with the normal distribution:
+
+```{r}
+phi = 0.3
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ma = phi), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ma = phi), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an MA(1) model
+    ma1 <- arima(
+      x = Y,
+      order = c(0, 0, 1),
+      include.mean = TRUE
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the intercept is ma1$coef[2]
+    resultsT$bias[m] <- ma1$coef[2] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the intercept is ma1$var.coef[2,2]
+    resultsT$normalized_coef[m] <- (ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec,
+  "delta1" = rep(NA, length(capT_vec)),
+  "delta2" = rep(NA, length(capT_vec)),
+  "delta3" = rep(NA, length(capT_vec)),
+  "delta4" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the intercept estimator", title = unname(TeX("$Y_t = c + \\phi \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(temp, aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in distribution of the intercept estimator", title = unname(TeX("$Y_t = c + \\phi \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec,
+  "rej" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the intercept estimator", title = unname(TeX("$Y_t = c + \\phi \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+### Expontential Distribution
+
+We have $\phi = 0.3$. But now $g = 0$.
+
+```{r}
+phi = 0.3
+g = 0
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(211216)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ma = phi), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ma = phi), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an MA(1) model
+    ma1 <- arima(
+      x = Y,
+      order = c(0, 0, 1),
+      include.mean = TRUE
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the intercept is ma1$coef[2]
+    resultsT$bias[m] <- ma1$coef[2] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the intercept is ma1$var.coef[2,2]
+    resultsT$normalized_coef[m] <- (ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ma1$coef[2] - 0) / sqrt(ma1$var.coef[2,2])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec,
+  "delta1" = rep(NA, length(capT_vec)),
+  "delta2" = rep(NA, length(capT_vec)),
+  "delta3" = rep(NA, length(capT_vec)),
+  "delta4" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the intercept estimator", title = unname(TeX("$Y_t = c + \\phi \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(temp, aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in distribution if the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec,
+  "rej" = rep(NA, length(capT_vec))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 1)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the intercept estimator", title = unname(TeX("$Y_t = c + \\theta \\epsilon_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+```
+
+## Estimator for the first autoregressive coefficient of $Y_t = c + \phi \Y_{t-1} + \epsilon_t$, where $c=0$, $\phi = 0.3$ and $\epsilon_t$ is i.i.d. $N(0,1)$ or i.i.d. $exp(1)$.
+
+To keep things organized, I will clean the environment before each model. Note that we will change to model from an $MA(1)$ to an $AR(1)$. In the code, this will be done by replacing the ``order`` argument of the ``arima`` function, from ``c(0,0,1)`` to ``c(1,0,0)``. Also, since we wish to use the estimator for the first autoregressive coefficient, instead for the intercept as we did in the previous two models, we will now take the first element of the ``ar1`` object. Remember that the intercept is also the last, and not the first, coefficient to be shown in a object generated by the ``arima`` function. We will proceed analagously in the next models.
+
+For some reason, probably because the simulation estimated models that were close to non-stationary, the number of elements in the list ``results`` was almost always smaller then the number of elements of ``capT_vec``. This, of course, made the plotting impossible. My solution was to identify which sample sizes actually were in ``results`` and use only those for iteration. I am not sure how good a solution this is. Probably not very good. But it was the best I could come up with.
+
+Additionally, a colleague (Daniel Ribeiro) suggested using a different method in the ``arima`` function, changing the ``method`` parameter from default to ``ML``, as described here: https://stats.stackexchange.com/questions/85374/how-to-simulate-only-stationary-ar1-with-%CF%86-0-9
+
+However, sometimes this could not solve the problem as well.
+
+```{r}
+rm(list=ls())
+
+# Set seed (so we have replicable results)
+set.seed(999)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+```
+
+
+### Normal Distribution
+
+We have $\phi = 0.3$. Let's start with the normal distribution:
+
+```{r}
+phi = 0.3
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an AR(1) model
+    ar1 <- arima(
+      x = Y,
+      order = c(1, 0, 0),
+      include.mean = TRUE
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the first autoregressive term is ar1$coef[1]
+    resultsT$bias[m] <- ar1$coef[1] - phi
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (ar1$coef[1] - phi) / sqrt(ar1$var.coef[1,1])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ar1$coef[1] - phi) / sqrt(ar1$var.coef[1,1])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+### Expontential Distribution
+
+We have $\phi = 0.3$. But now $g = 0$.
+
+```{r}
+phi = 0.3
+g = 0
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(2112165)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept. 
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an AR(1) model
+    ar1 <- arima(
+      x = Y,
+      order = c(1, 0, 0),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estmated coefficient of the intercept is ar1$coef[1]
+    resultsT$bias[m] <- ar1$coef[1] - phi
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the intercept is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (ar1$coef[1] - phi) / sqrt(ar1$var.coef[1,1])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((ar1$coef[1] - phi) / sqrt(ar1$var.coef[1,1])) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator of the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\epsilon_t$, where $c=0$, $\\phi = 0.3$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in distribution for the estimator of the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\theta Y_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT_vec_subset)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 1)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control for the estimator of the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\theta Y_{t-1} + \\epsilon_t$, where $c=0$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+```
+
+## The intercept estimator of $Y_t = c + \phi \Y_{t-1} + \theta \epsilon_{t-1} + \epsilon_t$, where $c=0$, $\phi = 0.3$, $\theta = 0.5$ and $\epsilon_t$ is i.i.d. $N(0,1)$ or i.i.d. $exp(1)$.
+
+To keep things organized, I will clean the environment before each model. 
+
+```{r}
+rm(list=ls())
+
+# Set seed (so we have replicable results)
+set.seed(999)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+```
+
+
+### Normal Distribution
+
+We have $\phi = 0.3$ and $\theta = 0.5$. Let's start with the normal distribution:
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is ar1$coef[3]
+    resultsT$bias[m] <- arma11$coef[3] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (arma11$coef[3] - 0) / sqrt(arma11$var.coef[3,3])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[3] - 0) / sqrt(arma11$coef[3] - 0)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT_vec_subset)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+### Expontential Distribution
+
+We have $\phi = 0.3$. But now $g = 0$.
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 0
+
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(2112165)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is ar1$coef[3]
+    resultsT$bias[m] <- arma11$coef[3] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (arma11$coef[3] - 0) / sqrt(arma11$var.coef[3,3])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[3] - 0) / sqrt(arma11$coef[3] - 0)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(temp, aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the intercept", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+## The estimator for the first autoregressive coefficient of $Y_t = c + $\\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t-1}$, where $c=0$, $\\phi = 0.3$ and $\theta = 0.5$ is i.i.d $N(0,1)$ or $exp(1)$.
+
+To keep things organized, I will clean the environment before each model. 
+
+```{r}
+rm(list=ls())
+
+# Set seed (so we have replicable results)
+set.seed(999)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+```
+
+
+### Normal Distribution
+
+We have $\phi = 0.3$ and $\theta = 0.5$. Let's start with the normal distribution:
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is arma11$coef[1]
+    resultsT$bias[m] <- arma11$coef[1] - phi
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (arma11$coef[1] - phi) / sqrt(arma11$var.coef[1,1])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[1] - phi) / sqrt(arma11$coef[1] - phi)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of for the estimator of the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+### Expontential Distribution
+
+We have $\phi = 0.3$. But now $g = 0$.
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 0
+
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(2112165)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is ar1$coef[3]
+    resultsT$bias[m] <- arma11$coef[3] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (arma11$coef[3] - 0) / sqrt(arma11$var.coef[3,3])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[3] - 0) / sqrt(arma11$coef[3] - 0)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+
+## The estimator for the first moving average coefficient of $Y_t = c + $\\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t-1}$, where $c=0$, $\\phi = 0.3$ and $\theta = 0.5$ is i.i.d $N(0,1)$ or $exp(1)$.
+
+To keep things organized, I will clean the environment before each model. 
+
+```{r}
+rm(list=ls())
+
+# Set seed (so we have replicable results)
+set.seed(999)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+# Length of the time series (same as the original code)
+capT_vec <- c(4:100, seq(110, 200, 10), seq(250, 500, 50))
+
+# Number of MC repetitions (same as the original code)
+M <- 1000
+
+# Allowed distance for convergence in probability (same as the original code)
+delta <- c(0.25, 0.2, 0.15, 0.1)
+
+```
+
+
+### Normal Distribution
+
+We have $\phi = 0.3$ and $\theta = 0.5$. Let's start with the normal distribution:
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 1
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is arma11$coef[2]
+    resultsT$bias[m] <- arma11$coef[2] - theta
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[2,2]
+    resultsT$normalized_coef[m] <- (arma11$coef[2] - theta) / sqrt(arma11$var.coef[2,2])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[2] - theta) / sqrt(arma11$coef[2] - theta)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of for the estimator of the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $N(0,1)$")))
+
+print(gg)
+
+```
+
+### Expontential Distribution
+
+We have $\phi = 0.3$. But now $g = 0$.
+
+```{r}
+phi = 0.3
+theta = 0.5
+g = 0
+
+
+# Set seed (so we have replicable results) (same as the original code)
+set.seed(2112165)
+
+# Setup parallel backend to use all but one of the cores (same as the original code)
+n.cores <- 10
+cl <- makeCluster(n.cores)
+registerDoParallel(cl)
+
+
+```
+
+We will run a Monte Carlo Experiment by running a parallel loop over sample sizes. But instead of using the estimator of the first moving average coefficient, we will use the estimator of the intercept.
+
+Note that, in this model, not only we also had to use ``method = "ML``, but we had to use a different ``seed``above.
+
+```{r}
+results <- foreach(
+  capT = capT_vec, .inorder = TRUE, .errorhandling = "remove", .verbose = FALSE
+) %dopar% {
+  # Create a dataframe to store the results for each MC repetition
+  resultsT <- data.frame(
+    "capT" = rep(capT, M),
+    "bias" = rep(NA, M),
+    "normalized_coef" = rep(NA, M),
+    "reject" = rep(NA, M)
+  )
+
+  # Loop over MC repetitions
+  for (m in 1:M) {
+    # Simulate an MA(1) process. If g == 1, it is a Gaussian process.
+    if (g == 1) {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rnorm)
+
+      # If g == 0, it is a exponential process
+    } else {
+      Y <- arima.sim(model = list(ar = phi, ma = theta), n = capT, rand.gen = rexp)
+
+    }
+
+    # Estimate an ARMA(1) model
+    arma11 <- arima(
+      x = Y,
+      order = c(1, 0, 1),
+      include.mean = TRUE,
+      method = "ML"
+    )
+
+    ###################################
+    # Store the results
+    ###################################
+    # Store the estimated bias
+    # Here the estimated coefficient of the intercept is ar1$coef[3]
+    resultsT$bias[m] <- arma11$coef[3] - 0
+
+    # Store the normalized coefficient
+    # The variance of the estimated coefficient of the first autoregressive term is ar1$var.coef[1,1]
+    resultsT$normalized_coef[m] <- (arma11$coef[3] - 0) / sqrt(arma11$var.coef[3,3])
+
+    # Store the test decision
+    resultsT$reject[m] <- as.numeric(
+      abs((arma11$coef[3] - 0) / sqrt(arma11$coef[3] - 0)) >= qnorm(0.975)
+    )
+
+  }
+
+  # Return the results
+  return(resultsT)
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+```
+
+
+Now I will find the sample sizes which were actually used in the simulations and select only these sample sizes for plotting in the following chunks of code.
+
+```{r}
+results_bind <- bind_rows(results)
+
+notin_capT <- capT_vec[!capT_vec %in% unique(results_bind$capT)]
+print(notin_capT) # These are the sample sizes that are not in results. We will not use them.
+
+capT_vec_subset <- unique(results_bind$capT)
+
+```
+
+
+#### Convergence in probability
+
+```{r}
+# Create a matrix to store the results
+probs <- data.frame(
+  "capT" = capT_vec_subset,
+  "delta1" = rep(NA, length(capT_vec_subset)),
+  "delta2" = rep(NA, length(capT_vec_subset)),
+  "delta3" = rep(NA, length(capT_vec_subset)),
+  "delta4" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Loop over values of delta: Once more, I chose I slow code so that I would
+  # save my own time.
+  for (d in delta) {
+    # Compare all MC estimates against delta
+    print(t)
+    temp <- abs(results[[t]]$bias) > d
+
+    # Compute the probability of the bias being small
+    probs[t, which(d == delta) + 1] <- mean(temp)
+  }
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = probs, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Probability") +
+  geom_line(
+    aes(y = delta1, color = "d = 0.25"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta2, color = "d = 0.20"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta3, color = "d = 0.15"),
+    size = 1.5
+  ) +
+  geom_line(
+    aes(y = delta4, color = "d = 0.10"),
+    size = 1.5
+  ) +
+  scale_colour_manual(values = c(
+    "#85C0F9", "#0F2080", "#F5793A", "#A95AA1"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+#### Convergence in distribution
+
+```{r}
+# Collect the CDF of our normalized coefficient for each sample size
+#######################################
+# Create a data frame to store the results
+temp <- data.frame(
+  "capT" = rep(NA, 6 * 101),
+  "Fy" = rep(NA, 6 * 101),
+  "Qy" = rep(NA, 6 * 101)
+)
+
+# Find the relevant sample size indexes
+i_vec <- which(capT_vec_subset %in% c(5, 10, 15, 20, 50, 100))
+
+# Loop over the sample sizes
+for (i in i_vec) {
+  # Index within i_vec
+  j <- which(i == i_vec)
+
+  # Write the sample size
+  temp$capT[(1 + (j - 1) * 101):(j * 101)] <- results[[i]]$capT[1]
+
+  # Write down the probabilities
+  temp$Fy[(1 + (j - 1) * 101):(j * 101)] <- seq(0, 1, 0.01)
+
+  # Write down the quantiles
+  temp$Qy[(1 + (j - 1) * 101):(j * 101)] <- quantile(
+    results[[i]]$normalized_coef, probs = seq(0, 1, 0.01), na.rm = TRUE
+  )
+}
+
+# Write capT as a factor to enforce the ordering
+temp$capT <- factor(temp$capT)
+
+# Create a ggplot
+gg <- ggplot(na.omit(temp), aes(x = Qy, y = Fy)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Normalized Coefficient") + ylab("CDF") +
+  geom_line(aes(colour = capT), size = 2) +
+  stat_function(fun = pnorm, size = 1, linetype = "dashed")  +
+  theme(
+    legend.position = "bottom"
+  ) + guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE, title = "Sample Size")
+  ) +
+  labs(subtitle = "Convergence in probability of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+# Show the plot
+print(gg)
+
+```
+
+#### Test size control
+
+```{r}
+# Create a matrix to store the results
+rej_rate <- data.frame(
+  "capT" = capT_vec_subset,
+  "rej" = rep(NA, length(capT_vec_subset))
+)
+
+# Loop over sample size
+for (t in 1:length(capT_vec_subset)) {
+  # Compute the test size
+  rej_rate[t, 2] <- mean(results[[t]]$reject, na.rm = TRUE)
+
+}
+
+# Create a plot with the results
+gg <- ggplot(data = rej_rate, aes(x = capT)) +
+  theme_bw(base_size = 10) +
+  theme(plot.margin = unit(c(5, 7, 2, 2), "mm")) +
+  xlab("Sample Size") + ylab("Rejection Rate") +
+  scale_y_continuous(
+    limits = c(0, 0.5)
+  ) +
+  geom_line(
+    aes(y = rej),
+    size = 1.5, colour = "#0F2080"
+  ) +
+  geom_hline(
+    yintercept = 0.05, size = 1.5, linetype = "dashed", color = "#F5793A"
+  )  +
+  labs(subtitle = "Test size control of the estimator for the first autoregressive coefficient", title = unname(TeX("$Y_t = c + \\phi Y_{t-1} + \\theta \\epsilon_{t-1} + \\epsilon_{t}$, where $c=0$, $\\phi = 0.3$, $\\theta = 0.5$ and $\\epsilon_t$ is i.i.d. $exp(1)$")))
+
+print(gg)
+
+```
+
+### Based on the simulations above, do you feel comfortable with a sample size of 500 periods for any stochastic process? Explain your answer.
+
+Not for any stochastic process. A sample size of 500 periods was enough for convergence in probability when the white noise was Gaussian, but it was not the case for some exponential models.
+
+## Question 3
+
+### Give one example of a weakly stationary stochastic process.
+
+The returns of a risk-free financial asset.
+
+### Give one example of a stochastic process that is not stationary.
+
+The level of gross domestic product.
