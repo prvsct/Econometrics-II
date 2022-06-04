@@ -1,0 +1,170 @@
+---
+title: "Problem Set 2 Questions 2 and 4"
+author: "Pedro Scatimburgo"
+date: "03/06/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preamble
+
+This file contains questions 2 and 4 of Problem Set 2. Here we set the seed and load the main packages.
+
+```{r}
+
+rm(list=ls())
+
+set.seed(999)
+
+library(tidyverse)
+library(urca)
+library(zoo)
+
+
+path <- "C:\\Users\\psrov\\OneDrive - Fundacao Getulio Vargas - FGV\\Documentos\\EESP\\Disciplinas\\2 Tri\\Econometrics II\\Problem Sets\\Problem Set 2\\data\\"
+```
+
+# Question 2
+
+We will run a Monte Carlo simulation for items 1. and 2. For the Monte Carlo simulation itself, I will use a standard ``for`` loop. Let's set the parameters. ``capT`` is the sample size $T$, ``alpha`` is the intercept $\alpha$, ``delta`` is the slope $\delta$ and ``M`` is the number of Monte Carlo repetitions $M$.
+
+```{r}
+
+capT = 10^4
+alpha = 0
+delta = 1
+M = 10^4
+
+```
+
+## Five degrees of freedom
+
+Now we generate the $\{\epsilon_t\}$ process and run the simulations. ``dgfr`` stores the degrees of freedom and ``siglevel`` the level of significance. I use ``siglevel`` to calculate the ``tscore`` of a normal distribution. Then I create a ``results` dataframe that will store the calculated t-scores of the linear regression.
+
+I loop in ``i`` through 1 to ``M = 10^4``. I generate the $\{\epsilon_t\}$ process using the ``rt`` function and store the pseudo-random values in ``epsilon``. Then I create the $\{Y_t\}$ process and store it in ``Yt``. ``x`` is simply a sequence ``1:10^4``. We will run a linear regression of $\{Y_t\}$ against a column of numbers from $1$ to $10,000$. I store the linear regression in the ``reg`` object. Note that to change the null hypothesis, I use as formula the expression ``Yt ~ x + offset(1.00*x)``. For more information about this, check: https://stats.stackexchange.com/questions/9825/changing-null-hypothesis-in-linear-regression
+
+Finally, I store each t-score in the ``results`` dataframe. To calculate the rejection rate, I use ``plyr::count`` to check how many values attend the condition ``abs(results) > abs(tscore)``.
+
+```{r}
+dgfr = 5 # Degrees of freedom
+siglevel = 0.1 # Significance level
+tscore = qnorm(p = siglevel/2) # Tscore
+
+results_5 <- data.frame(
+  "tscore" = numeric(capT)
+)
+
+for(i in 1:M){
+  
+  epsilon = rt(n = capT, df = dgfr)
+  
+  Yt = alpha + delta*seq(1:capT) + epsilon
+  
+  x = seq(1:capT)
+  
+  reg <- lm(data = as.data.frame(Yt), formula = Yt ~ x + offset(1.00*x))
+  
+  results_5$tscore[i] <- summary(reg)[["coefficients"]][2,"t value"]
+  
+}
+
+freq_5 <- plyr::count(abs(results_5) > abs(tscore))
+freq_5$freq[2]/10000*100
+
+```
+## One degree of freedom
+
+The rejection rate is `r freq_5$freq[2]/10000*100`, which is pretty close to the significante interval.
+
+Now we perform the same procedure, but with ``dgfr = 1``:
+
+```{r}
+dgfr = 1 # Degrees of freedom
+siglevel = 0.1 # Significance level
+tscore = qnorm(p = siglevel/2) # Tscore
+
+results_1 <- data.frame(
+  "tscore" = numeric(capT)
+)
+
+for(i in 1:M){
+  
+  epsilon = rt(n = capT, df = dgfr)
+  
+  Yt = alpha + delta*seq(1:capT) + epsilon
+  
+  x = seq(1:capT)
+  
+  reg <- lm(data = as.data.frame(Yt), formula = Yt ~ x + offset(1.00*x))
+  
+  results_1$tscore[i] <- summary(reg)[["coefficients"]][2,"t value"]
+  
+}
+
+freq_1 <- plyr::count(abs(results_1) > abs(tscore))
+freq_1$freq[2]/10000*100
+
+```
+Now, the rejection rate is `r freq_1$freq[2]/10000*100`, which is lower than the significance level.
+
+The rejection rates in items 1 and 2, `r freq_5$freq[2]/10000*100` and `r freq_1$freq[2]/10000*100`, respectively, are very different from each other, considering that we are running ten thousand simulations and using a sample size of also ten thousand. This difference is explained by the fact that a t-distribution with a lower degree of freedom has higher variance. This reduces the t-statistic and, therefore, causes underrejection.
+
+
+# Question 4
+
+Let's load and prepare the data:
+
+```{r}
+corn_production <- readr::read_csv(paste0(path,"corn-production-land-us.csv")) %>%
+  filter(Year >= 1950) %>%
+  mutate(
+    year = as.Date(as.character(Year), "%Y"),
+    production = `Corn production (tonnes)`
+  ) %>%
+  select(year,production)
+  
+
+```
+
+To determine what kind of test we should do, let's plot the graph and do some visual analysis:
+
+```{r}
+production_plot <- ggplot(data = corn_production) + 
+  geom_line(aes(x = year, y = production)) +
+  scale_x_date(name = "Year",breaks = "5 years",date_labels = "%Y") +
+  scale_y_continuous(name = "Production",breaks = waiver()) +
+  theme_bw(base_size = 10)
+
+print(production_plot)
+
+```
+
+It looks like there is a trend, so we will use the ``ur.df`` function with parameter ``type = "trend"``. But firstly, consider the model:
+
+\begin{equation}
+  \Delta Y_t = \rho Y_{t-1} + \delta t + \alpha \sum_{i=1}^p \beta_i \Delta Y_t{t-i+1} + \epsilon_t
+\end{equation}
+
+We have the following convention:
+
+$(\phi 2)$ $H_0: \rho=1 \text{ and } \delta=0 \text{ and } \alpha = 0$
+
+$(\phi 3)$ $H_0: \rho = 1 \text{ and } \delta =0$
+
+$(\tau 3)$ $H_0: \rho = 1$
+
+Let's test it:
+
+
+```{r}
+production_urtest <- ur.df(y = corn_production$production, type = "trend", selectlags = "BIC")
+
+summary(production_urtest)
+```
+
+Since $-4.3468 < -4.04$, $7.8636 > 6.50$ and $9.5984 > 8.73$, all of the null hypothesis defined above are reject at the 1% level. Therefore, there is no unit root under the null, but we do have a time trend and a drift.
