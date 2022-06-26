@@ -1,0 +1,328 @@
+---
+title: "Problem Set 4"
+author: "Pedro Scatimburgo"
+date: "26/06/2022"
+output:
+  html_document:
+    theme: paper
+    toc: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F)
+```
+
+## Preamble
+
+Here I load the main packages and the data. I also rename the columns.
+
+```{r}
+rm(list=ls())
+
+library(tidyverse)
+library(urca)
+library(latex2exp)
+
+brazil_data_raw <- readr::read_csv(paste0("data\\brazil_data.csv"))
+
+brazil_data_raw <- brazil_data_raw %>%
+  mutate(
+    date = brazil_data_raw$Data,
+    exrate = brazil_data_raw$`Taxa de câmbio - R$ / US$ - comercial - venda - fim período - R$ - Banco Central do Brasil- Boletim- Seção Balanço de Pagamentos (Bacen / Boletim / BP) - BM12_ERVF12`,
+    ipca = brazil_data_raw$`IPCA - geral - índice (dez. 1993 = 100) - - - Instituto Brasileiro de Geografia e Estatística- Sistema Nacional de Índices de Preços ao Consumidor (IBGE/SNIPC) - PRECOS12_IPCA12`
+  ) %>%
+  select(date, exrate, ipca)
+  
+usa_data_raw <- readr::read_csv(paste0("data\\usa_data.csv"))
+
+usa_data_raw <- usa_data_raw %>%
+  mutate(
+    date = usa_data_raw$DATE,
+    cpi = usa_data_raw$USACPIALLMINMEI
+  ) %>%
+  select(date, cpi)
+```
+
+## Question 1 (Testing for Cointegration when the Cointegrating Vector is Known - 150 points)
+
+### Subset your data to cover only the analyzed period.
+
+Although this is pretty straightforward using base R, I prefer to use the ``tidyverse`` collection. ``lubridate::ym`` automatically converts a object into the proper ```date`` format, but it cannot recognize ``yyyy.mm`` as a date. Because of that, first I replace ``.`` for ``:`` using ``stringr::str_replace`` and only then I use ``lubridate::ym``.
+
+```{r}
+brazil_data <- brazil_data_raw %>%
+  mutate(
+    date_transform = str_replace(date, pattern = "\\.", replacement = "\\:")
+    ) %>%
+  mutate(
+    date = lubridate::ym(str_replace(date_transform, pattern = ":1\\b", replacement = ":10"))
+  ) %>%
+  filter(date >= "1995-01-01" & date <= "2019-12-01") %>%
+  select(date, exrate, ipca)
+
+usa_data <- usa_data_raw %>%
+  filter(date >= "1995-01-01" & date <= "2019-12-01")
+
+data <- inner_join(brazil_data, usa_data, by="date")
+```
+
+### For each variable $X_{k,t} \in \{1,2,3\}$ in your dataset, define $Y_{k,t} := 100[\log (X_{k,t})-\log (X_{k,January1995})$.
+
+```{r}
+data <- data %>%
+  mutate(
+    log_exrate = 100*(log(exrate)-log(data$exrate[1])),
+    log_ipca = 100*(log(ipca)-log(data$ipca[1])),
+    log_cpi = 100*(log(cpi)-log(data$cpi[1]))
+  )
+```
+
+### According to the purchasing power parity, what is the value of the cointegrating vector $a$? To answer this question, you must be clear about the ordering of your variables and careful about measurement units.
+
+The purchasing power parity states that the variation in the exchange rate, measured as the domestic price of the foreing currency, should be equal to the inflation spread between the two countries:
+
+\begin{equation*}
+  \Delta \epsilon = \pi - \pi^* \implies \pi - \pi^* - \Delta \varepsilon = 0
+\end{equation*}
+
+The weaker version of the PPP states that $Z_t := \pi - \Delta \varepsilon - \pi^*$ should be a stationary process.
+
+The exchanged rate is already in the desired format $\frac{R\$}{US\$}$. Also, given the definition of $Z_t$ above, the ordering of our variables should be: ``log_ipca``, ``log_exrate`` and ``log_cpi``. Then the cointegrating vector $a$ should be:
+
+\begin{equation*}
+  a = (1,-1,-1)^\prime
+\end{equation*}
+
+### Define $Z_t = a^\prime Y_t$, where $Y_t = (Y_{1,t},Y_{2,t},Y_{3,t})^\prime$.
+
+```{r}
+
+Zt = data$log_ipca - data$log_exrate - data$log_cpi
+
+```
+
+### Plot the data for $Y_{t,k}$, $k \in \{1,2,3\}$.
+
+```{r}
+
+log_data_plot <- data %>%
+  select(date, log_exrate, log_ipca, log_cpi) %>%
+  pivot_longer(cols = -date, names_to = "variable", values_to = "value") %>%
+  ggplot() +
+  geom_line(aes(x = date, y = value, group = variable, color = variable)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  scale_x_date(name = "Date", date_breaks = "3 years", date_labels = "%y-%m") +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual("",
+                     values = c("log_exrate"="black", "log_cpi"="red", "log_ipca"="blue"),
+                     labels = c("log_exrate"="Exchange rate", "log_cpi"="CPI", "log_ipca"="IPCA"),) + 
+  labs(title = "Exchange rate, IPCA and CPI variations in respect to January 1995",
+       subtitle = unname(TeX("Calculated as $Y_{k,t} := 100(\\log (X_{k,t})-\\log (X_{k,January1995}))$"))) +
+  theme_bw(base_size = 8) +
+  theme(legend.position = "bottom")
+
+plot(log_data_plot)
+```
+
+### Using the Augmented Dickey-Fuller test, test whether your $Y_{k,t}$ variables are each individually $I(1)$. Be clear about the specification of your Augmented Dickey-Fuller test and about your null hypothesis, explaining how you choose the number of lags and your null hypothesis.
+
+Looking at the plots, it seems reasonable to assume that all variables have a time trend. This is very clear for ``log_ipca`` and ``log_cpi``, but less so for ``log_exrate``. Still, you could argue there is a trend and a structural break for the latter. Therefore, the null hypothesis is $H_0: \rho = 1, \delta = 0, \alpha = 0$, which means we will test using ``type = "trend"`.
+
+For the lag selection, I used the ``selectlags = "BIC"`` option. However, since in Possebom's latest lecture, he advocated for a more theory-oriented testing, I decided to set a maximum number of lags of $12$, which seems appropriate since we are dealing with monthly data.
+
+```{r}
+
+data_testing <- cbind(data$log_exrate, data$log_ipca, data$log_cpi)
+var_names <- c("Exchange Rate","IPCA","CPI")
+
+for(p in 1:3){
+  
+  test <- ur.df(y = data_testing[,p],
+               type = "trend",
+               selectlags = "BIC",
+               lags = 12)
+ 
+ sum_test <- summary(test)
+ 
+ cat(paste0("Results of the ADF Test for the ",var_names[p]),"\n")
+ print(sum_test@teststat)
+ cat("","\n")
+ cat("","\n")
+  
+}
+
+```
+
+The critical values are:
+
+```{r}
+print(sum_test@cval)
+```
+
+
+Remember that we have  the following convention:
+
+$(\phi 2)$ $H_0: \rho=1 \text{ and } \delta=0 \text{ and } \alpha = 0$
+
+$(\phi 3)$ $H_0: \rho = 1 \text{ and } \delta =0$
+
+$(\tau 3)$ $H_0: \rho = 1$
+
+Because $1.999 < 4.05$, we do not reject the null hypothesis $(\phi 2)$ for the exchange rate at the $10\%$ level: we can say that the log-variation of the exchange rate has a unit root, but has no time trend and no drift. Because $14.8383 > 6.15$, we reject the null hypothesis $(\phi 2)$ for the IPCA at the $1\%$ level; but we cannot reject the null hypothesis $(\phi 3)$: we can say that the log-variation of the IPCA has a unit root and a drift, but no time trend. Similarly, because $12.029 > 6.15$, we reject the null hypothesis $(\phi 2)$ for the CPI, but we cannot reject the null hypothesis $(\phi 3)$: we can say that the log-variation of the CPI also has a unit root and a drift but no time trend as well.
+
+### Plot the data for Zt.
+
+```{r}
+
+Zt_plot <- data.frame(
+  "date"=data$date,
+  "zt"=Zt
+) %>%
+  ggplot() + 
+  geom_line(aes(x = date, y = zt)) + 
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  scale_x_date(name = "Date", date_breaks = "3 years", date_labels = "%y-%m") +
+  labs(title = unname(TeX("$Z_t = a'Y_t$, where $Y_t = (Y_{1,k},Y_{2,k},Y_{3,k})$")),
+       subtitle = "Equivalently: log_ipca - log_exrate - log_cpi") +
+  theme_bw(base_size = 10)
+
+plot(Zt_plot)
+```
+
+### Using the Augmented Dickey-Fuller test, test whether $Z_t$ is $I(1)$. Be clear about the specification of your Augmented Dickey-Fuller test and about your null hypothesis, explaining how you choose the number of lags and your null hypothesis.
+
+This time it's much harder to argue that the series has a time trend, so I will use ``type = "drift"``. The remaining arguments for the test specification remains the same as before: I use ``selectlags = "BIC"`` for automatic lag selection using the BIC and set a maximum lag of $12$ since we have monthly data.
+
+```{r}
+zt_test <- ur.df(y = Zt,
+               type = "drift",
+               selectlags = "BIC",
+               lags = 12)
+ 
+sum_zt_test <- summary(zt_test)
+```
+
+The results of the ADF test for $Z_t$ are:
+
+```{r}
+print(sum_zt_test@teststat)
+```
+
+While the critical values for the test are:
+
+```{r}
+print(sum_zt_test@cval)
+```
+
+Since $-1.876845 > -2.57$, we cannot reject the null hypothesis $(\tau_2)$. This means that $Z_t$ has a unit root under the null, and is not stationary.
+
+### Based on your analysis, do you believe that the purchasing power parity holds in this context? Explain.
+
+The testable conclusion of the PPP is that $Z_t := \pi - \Delta \varepsilon - \pi^*$ is a stationary process. Remember that the PPP is a generalization of the Law of One Price for bundles of goods: two equal bundles must have the same price, when priced in the same currency. The weaker version allows for the fact that there might some variation in the price, but this variation will be stationary. When we reject the hypothesis that $\pi - \Delta \varepsilon - \pi^*$ is a stationary process, we are rejecting the testable conclusion of the PPP. 
+
+Based solely on the ADF test and the data that we have collected, we cannot say that the PPP holds in this specific context.
+
+## Question 2 (Testing for Cointegration when the Cointegrating Vector is Unknown - 120 points)
+
+### Choose a order for your variables and justify your choice.
+
+The null hypothesis in the Phillips-Ouliaris-Hansen test is that there is no cointegrating relation among our variables $Y_t$. We estimate the following regression:
+
+\begin{equation*}
+  Y_{1,t} = \alpha + \gamma_2Y_{2,t} + \dots + \gamma_nY_{n,t} + U_t
+\end{equation*}
+
+And save the residuals $\hat{U}_t$ to test whether it is a $I(1)$ process using a ADF test with no drift. Therefore, the ordering of the variables in the Phillips-Ouliaris-Hansen test it to avoid choosing a dependent variable with coefficient equal to $0$. Since we have no reason to assume this for any of the variables, I will simply use the ordering I have been using before: ``log_exrate``, ``log_ipca``, ``log_cpi``.
+
+Since the last item asks us to repeat the same process for all possible orderings, I will do everything at once from this point forward.
+
+### Estimate $Y_{1,t} = \alpha + \gamma_2Y_{2,t} + \gamma_3Y_{3,t} + U_t$, save the estimated residuals and report the estimated cointegrating vector.
+
+I estimate all models and run all tests:
+
+```{r}
+exrate_ipca_cpi <- lm(data = select(.data = data, log_exrate, log_ipca, log_cpi),
+                                    formula = log_exrate ~ log_ipca + log_cpi)
+residuals_exrate_ipca_cpi <- exrate_ipca_cpi$residuals
+adf_exrate_ipca_cpi <- summary(ur.df(y = residuals_exrate_ipca_cpi,type = "none",selectlags = "BIC"))
+
+cpi_exrate_ipca <- lm(data = select(.data = data, log_cpi, log_exrate, log_ipca),
+                                    formula = log_cpi ~ log_exrate + log_ipca)
+residuals_cpi_exrate_ipca <- cpi_exrate_ipca$residuals
+adf_cpi_exrate_ipca <- summary(ur.df(y = residuals_cpi_exrate_ipca,type = "none",selectlags = "BIC"))
+
+ipca_exrate_cpi <- lm(data = select(.data = data, log_ipca, log_exrate, log_cpi),
+                                    formula = log_ipca ~ log_exrate + log_cpi)
+residuals_ipca_exrate_cpi <- ipca_exrate_cpi$residuals
+adf_ipca_exrate_cpi <- summary(ur.df(y = residuals_ipca_exrate_cpi,type = "none",selectlags = "BIC"))
+
+results_cointegrating_vector <- data.frame(
+  "FirstVariable"=c("log_exrate","log_ipca","log_cpi"),
+  "log_exrate"=numeric(3),
+  "log_ipca"=numeric(3),
+  "log_cpi"=numeric(3)
+)
+
+results_cointegrating_vector[results_cointegrating_vector$FirstVariable == "log_exrate",2:4] <- c(1,-exrate_ipca_cpi$coefficients[-1])
+
+results_cointegrating_vector[results_cointegrating_vector$FirstVariable == "log_ipca",2:4] <-
+  c(-ipca_exrate_cpi$coefficients[2],1,-ipca_exrate_cpi$coefficients[2],3)
+
+results_cointegrating_vector[results_cointegrating_vector$FirstVariable == "log_cpi",2:4] <-
+  c(-cpi_exrate_ipca$coefficients[2],-cpi_exrate_ipca$coefficients[3],1)
+
+results_residuals <- data.frame(
+  "log_exrate"=adf_exrate_ipca_cpi@teststat[1],
+  "log_ipca"=adf_ipca_exrate_cpi@teststat[1],
+  "log_cpi"=adf_cpi_exrate_ipca@teststat[1],
+  "siglevel_1"=-4.31,
+  "siglevel_5"=-3.77,
+  "siglevel_10"=-3.45
+)
+
+```
+
+The coefficientes of the cointegrating vectors are:
+
+```{r}
+print(results_cointegrating_vector)
+```
+
+The results of the ADF test for each model and the critical values as reported by Phillips-Ouliaris-Hansen for a sample size of 500 are:
+
+```{r}
+print(results_residuals)
+```
+All values are lower than $-3.45$. Therefore, we fail to reject the null hypothesis $H_0: \rho = 1$ for all models, indicating that the residuals all non-stationary.
+
+### Based on your analysis, do you believe that the three original variable are cointegrated? Explain.
+
+Since the residuals are $I(1)$ process (we have failed to reject the null hypothesis of the ADF test at the 10% level), following the Phillips-Ouliaris-Hansen procedure, I do not believe that the original three series are cointegrated. This is robust to the choice of the dependent variable.
+
+Note: by "original" series, I understand the log-transformed series.
+
+### Repeat the entire analysis in items 1-4 for the two remaining variable orderings. Are your conclusions robust to changing the order of your variables?
+
+This has already been answered: regardless of our choice of variable as dependent, we cannot reject the null hypothesis of a presence of a unit root in the residuals. Therefore, following the Phillips-Ouliaris-Hansen procedure, the conclusions are robust to the order of the variables.
+
+## Question 3 (Testing for Cointegration: Johansen's Approach - 30 points)
+
+### Using Johasen's Eigenvalue test, and the number of cointegration relations among our variables of interest. Be clear about and justify your choice of lags and your choice for the option ``ecdet``.
+
+I use ``ecdet = none`` for the same reason given in the code used in class: the theory predicts a stable long-run equilibrium for these variables, even if the Phillips-Ouliaris-Hansen indicated that the series are not cointegrated.
+
+```{r}
+johansen <- ca.jo(x = select(data, log_exrate, log_ipca, log_cpi),
+                  type = "eigen",
+                  ecdet = "none",
+                  K = 12,
+                  spec = "transitory")
+
+print(summary(johansen))
+```
+Since $18.87 < 18.90$, we fail to reject the null hypothesis of $H_0: r = 0$ at the 10% level. That is, the Johansen test indicates that there is zero cointegration relations among our variables.
+
+### Based on your results, do you believe that the purchasing power parity holds in this context. Explain.
+
+Just like the ADF test indicated, the series do not cointegrate. In this context, it is hard to argue that the PPP holds.

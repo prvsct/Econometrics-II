@@ -1,0 +1,276 @@
+---
+title: "Problem Set 3 Questions 1 and 6"
+author: "Pedro Scatimburgo"
+date: "19/06/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F)
+```
+
+# Preamble
+
+This file contains Questions 1 and 6 of Problem Set 3. As usual, we start by cleaning the environment and loading the main packages. To estimate the ADL models in Question 1, I rely on ``dynlm::dynlm:``.
+
+```{r}
+# Clears the environment
+rm(list=ls())
+
+# Loads main packages
+library(tidyverse)
+library(zoo)
+library(vars)
+library(dynlm)
+```
+
+# Question 1
+
+## Data loading and manipulation
+
+``data_brazil.csv`` is the file we will use throughout this problem set. To make my life easier, I create new variables, ``gdp``, ``exrate`` and ``ipc``, to store the GDP, exchange rate and inflation rate, respectively, since the name of the original columns are a bit cumbersome. I also filter the dataframe to include only the desired period.
+
+```{r}
+data_brazil <- readr::read_csv("data\\data_brazil.csv") %>%
+  filter(date >= 1942, date <= 2019) %>%
+  mutate(
+    gdp = real_gdp_growth_pct,
+    exrate = exchange_rate_real_dolar_annual_average,
+    ipc = ipc_fipe_pct
+  ) %>%
+  dplyr::select(date,gdp,exrate,ipc)
+```
+
+Since ``dynlm`` requires a ``ts`` object, I will convert the whole dataframe:
+
+```{r}
+data_brazil_ts <- data_brazil %>%
+  dplyr::select(-date) %>%
+  ts(start = 1942,
+     end = 2019, 
+     frequency = 1)
+```
+
+Since the ``dynlm`` function uses a standard error estimator that is not robust to homoskedasticity, I will use ``lmtest::coeftest`` to use a robust estimator for all models.
+
+## Model 1: Run an ADL(2,1) using GDP growth as your dependent variable and Exchange Rate as your predictor.
+
+### Report the estimated coefficient and their standard errors.
+
+```{r}
+adl_gdp_exrate <- dynlm(data = data_brazil_ts,
+                        formula = gdp ~ L(gdp,1) + L(gdp,2) + L(exrate,1),
+                        start = 1942,
+                        end = 2019)
+
+adl_gdp_exrate_coef <- lmtest::coeftest(x = adl_gdp_exrate, vcov.=sandwich)
+adl_gdp_exrate_coef
+
+```
+``(Intercept)`` is the estimated coefficient for the intercept, ``L(gdp, 1)`` is the estimated for the first lag of the GDP, ``L(gdp, 2)`` the estimated coefficient for the second lag of the GDP and ``L(exrate, 1)`` for the first lag of the exchange rate. The following models will use the same naming convention.
+
+### Predict GDP growth in 2020 using model 1.
+
+We can predict the GDP growth in 2020 simply by using $\hat{gdp}_{2020} = \hat{\alpha}+\hat{\delta}_1gdp_{2019}+\hat{\delta}_2gdp_{2018} + \hat{\delta}_3exrate_{2019}$, where $\hat{\alpha}$ is ```(Intercept)``, $\hat{\delta}_1$ is ``L(gdp, 1)``, $\hat{\delta}_2$ is ``L(gdp, 2)`` and $\hat{\delta}_3$ is ``L(exrate, 1)``. Then:
+
+```{r}
+adl_gdp_exrate_forecast <- adl_gdp_exrate_coef[1,1] + 
+  adl_gdp_exrate_coef[2,1]*data_brazil$gdp[data_brazil$date==2019] +
+  adl_gdp_exrate_coef[3,1]*data_brazil$gdp[data_brazil$date==2018] +
+  adl_gdp_exrate_coef[4,1]*data_brazil$exrate[data_brazil$date==2019]
+
+adl_gdp_exrate_forecast
+```
+The $ADL(2,1)$ model predicted a ``r paste0(round(adl_gdp_exrate_forecast,2),"%")`` growth for the GDP in 2020.
+
+
+## Model 2: Run an ADL(2,2) using GDP growth as your dependent variable and inflation as your predictor.
+
+### Report the estimated coefficient and their standard errors.
+
+```{r}
+adl_gdp_ipc <- dynlm(data = data_brazil_ts,
+                           formula = gdp ~ L(gdp,1) + L(gdp,2) + L(ipc,1) + L(ipc,2),
+                           start = 1942,
+                           end = 2019)
+
+adl_gdp_ipc_coef <- lmtest::coeftest(x = adl_gdp_ipc, vcov.=sandwich)
+adl_gdp_ipc_coef
+
+```
+
+### Predict GDP growth in 2020 using model 2.
+
+```{r}
+adl_gdp_ipc_forecast <- adl_gdp_ipc_coef[1,1] + 
+  adl_gdp_ipc_coef[2,1]*data_brazil$gdp[data_brazil$date==2019] +
+  adl_gdp_ipc_coef[3,1]*data_brazil$gdp[data_brazil$date==2018] +
+  adl_gdp_ipc_coef[4,1]*data_brazil$ipc[data_brazil$date==2019] +
+  adl_gdp_ipc_coef[5,1]*data_brazil$ipc[data_brazil$date==2018]
+
+adl_gdp_ipc_forecast
+```
+
+The $ADL(2,2)$ model predicted a ``r paste0(round(adl_gdp_ipc_forecast,2),"%")`` growth for the GDP in 2020.
+
+
+## Model 3: Run an general time series regression model using GDP growth as your dependent variable and two lags of GDP growth, Exchange Rate and Infation as your predictors.
+
+### Report the estimated coefficient and their standard errors.
+
+```{r}
+adl_gdp_exrate_ipc <- dynlm(data = data_brazil_ts,
+                        formula = gdp ~ L(gdp,1) + L(gdp,2) + L(exrate,1) + L(exrate,2) + L(ipc,1) + L(ipc,2),
+                        start = 1942,
+                        end = 2019)
+
+adl_gdp_exrate_ipc_coef <- lmtest::coeftest(x = adl_gdp_exrate_ipc, vcov.=sandwich)
+adl_gdp_exrate_ipc_coef
+
+```
+
+### Predict GDP growth in 2020 using model 3.
+
+```{r}
+adl_gdp_exrate_ipc_forecast <- adl_gdp_exrate_ipc_coef[1,1] + 
+  adl_gdp_exrate_ipc_coef[2,1]*data_brazil$gdp[data_brazil$date==2019] +
+  adl_gdp_exrate_ipc_coef[3,1]*data_brazil$gdp[data_brazil$date==2018] +
+  adl_gdp_exrate_ipc_coef[4,1]*data_brazil$exrate[data_brazil$date==2019] +
+  adl_gdp_exrate_ipc_coef[5,1]*data_brazil$exrate[data_brazil$date==2018] +
+  adl_gdp_exrate_ipc_coef[6,1]*data_brazil$ipc[data_brazil$date==2019] +
+  adl_gdp_exrate_ipc_coef[7,1]*data_brazil$ipc[data_brazil$date==2018]
+
+  adl_gdp_exrate_ipc_forecast
+```
+
+The GTS model predicted a ``r paste0(round(adl_gdp_exrate_ipc_forecast,2),"%")`` growth for the GDP in 2020.
+
+## Model 4: Run an ARMA(2,0) using GDP growth as your dependent variable.
+
+To run an ARMA(2,0), I use the ``stats::arima`` function, which is the canonical method for estimating ARIMA(p,d,q).
+
+### Report the estimated coefficient and their standard errors.
+
+Note that the ``arima`` does not report the actual Intercept, but the mean of the stochastic process insead. We must calculate the intercept using the formula: $\alpha = \mu(1-\delta_1-\delta_2)$
+
+```{r}
+arma_gdp <- arima(x = data_brazil_ts[,"gdp"], order = c(2,0,0))
+
+arma_gdp_coef <- coeftest(arma_gdp)
+
+arma_gdp_coef
+
+arma_gdp_coef_intercept <- arma_gdp_coef[3]*(1-arma_gdp_coef[1]-arma_gdp_coef[2])
+
+arma_gdp_coef_intercept
+```
+### Predict GDP growth in 2020 using model 4.
+
+```{r}
+arma_gdp_forecast <- arma_gdp_coef_intercept +
+  arma_gdp_coef[1,1]*data_brazil$gdp[data_brazil$date==2019] +
+  arma_gdp_coef[1,2]*data_brazil$gdp[data_brazil$date==2018]
+
+arma_gdp_forecast
+```
+The $ARMA(2,0)$ model predicted a ``r paste0(round(arma_gdp_forecast,2),"%")`` growth for the GDP in 2020.
+
+## Which model generate the prediction that is closest to the realized value?
+
+All models performed poorly. The realized GDP growth in 2020 was -3.88%, thus the General Time Series Model, which predicted a GDP growth of ``r paste0(round(adl_gdp_exrate_ipc_forecast,2),"%")``, generated the prediction that is closest to the realized value.
+
+# Question 6
+
+Since I have a lot of stuff in my environment, which I find rather confusing, I will delete everything but ``data_brazil`` and ``data_brazil_ts``.
+
+```{r}
+rm(list=c(ls()[c(-14,-15)]))
+```
+
+## 6.1.
+
+We will use the ``vars::VAR`` function to estimate the models. Since all models are the same but for the number of lags ``p``, I will use a ``for`` loop to estimate all models at once. Therefore, in this section, I report all coefficients and standard errors of items 6a) to 6c) and also predict the GDP growth in 2020 using each of the three models.
+
+I wasn't sure about including or not a time trend. Following the code used in class, I chose not to, so we have ``type = "const"``.
+
+```{r}
+for(p in 1:3){
+  
+  gdp_VAR <- VAR(y = data_brazil_ts, p = p, type = "const")
+  
+  cat(paste0("","\n"))
+  cat(paste0("Results for the VAR(",p,") model:","\n"))
+  stargazer::stargazer(gdp_VAR$varresult, type = "text")
+  cat(paste0("","\n"))
+  
+  gdp_VAR_forecast <- predict(gdp_VAR, n.ahead = 1)
+  cat(paste0("The GDP growth prediction using the VAR(",p,") model is: ",
+             round(gdp_VAR_forecast[["fcst"]][["gdp"]][1],3),"%\n"))
+  
+  
+}
+```
+
+### Which model generate the prediction that is closest to the realized value?
+
+The $VAR(1)$ model, which predicted a growth of ``0.234%``.
+
+## 6.2.
+
+Please note that item d) was compiled after the plots.
+
+### Choose the order of your variables and justify your exclusion restrictions
+
+The exchange rate should be the last variable: it is very a very volatile variable that quickly responds to unexpected shocks. The inflation rate should be the first, most exogenous variable: since prices are sticky (because of, say, menu costs), they don't react quickly to shocks in the exchange rate or the domestic GDP. Finally, GDP should be the second variable. Let's properly order the dataframe, create the ``ts`` object and estimate our $VAR(2)$ model:
+
+```{r}
+var2 <- data_brazil %>%
+  dplyr::select(ipc, gdp, exrate) %>%
+  ts(start = 1942, end = 2019, frequency = 1) %>%
+  VAR(p = 2, type = "both")
+  
+
+```
+
+### Estimate and plot all nine structural impulse response functions and their 90%-confdence intervals based on 1,000 bootstrap repetitions.
+
+Since the number of periods ahead was not specified, I have decided to use ``n.ahead = 4``, because in ``code01-var-example.R``, Possebom plots the IRF for 16 quarters. Note that we have yearly data here.
+
+I create three sets of three plots each. We could plot only three figures, but this would mess with the y-scale.
+
+```{r}
+structural_irf_exrate <- irf(x = var2,
+                      n.ahead = 4,
+                      ortho = T,
+                      boot = T,
+                      runs = 1000,
+                      ci = .9,
+                      response = "exrate")
+
+plot(structural_irf_exrate)
+
+structural_irf_ipc <- irf(x = var2,
+                      n.ahead = 4,
+                      ortho = T,
+                      boot = T,
+                      runs = 1000,
+                      ci = .9,
+                      response = "ipc")
+
+plot(structural_irf_ipc)
+
+structural_irf_gdp <- irf(x = var2,
+                      n.ahead = 4,
+                      ortho = T,
+                      boot = T,
+                      runs = 1000,
+                      ci = .9,
+                      response = "gdp")
+
+plot(structural_irf_gdp)
+
+```
+
+### Do you believe your results are credible? Justify your answer.
+
+I don't think these results are credible. From 1942 to 2019, there were several structural breaks and meaningful institutinal and economical changes in the Brazilian economy, such as periods of hyperinflation, the latin-american debt crisis in the early 1980s, the successive currency reforms and the mid 2010s recession. Without accounting for these changes, it's is very implausible to assume that the impulse response functions are actually reflecting a accurate effect of a shock in a certain variable into another.

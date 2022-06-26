@@ -1,7 +1,7 @@
 ---
 title: "Problem Set 2 Questions 2 and 4"
 author: "Pedro Scatimburgo"
-date: "03/06/2022"
+date: "06/06/2022"
 output:
   pdf_document: default
   html_document: default
@@ -77,9 +77,10 @@ freq_5 <- plyr::count(abs(results_5) > abs(tscore))
 freq_5$freq[2]/10000*100
 
 ```
-## One degree of freedom
 
 The rejection rate is `r freq_5$freq[2]/10000*100`, which is pretty close to the significante interval.
+
+## One degree of freedom
 
 Now we perform the same procedure, but with ``dgfr = 1``:
 
@@ -110,6 +111,7 @@ freq_1 <- plyr::count(abs(results_1) > abs(tscore))
 freq_1$freq[2]/10000*100
 
 ```
+
 Now, the rejection rate is `r freq_1$freq[2]/10000*100`, which is lower than the significance level.
 
 The rejection rates in items 1 and 2, `r freq_5$freq[2]/10000*100` and `r freq_1$freq[2]/10000*100`, respectively, are very different from each other, considering that we are running ten thousand simulations and using a sample size of also ten thousand. This difference is explained by the fact that a t-distribution with a lower degree of freedom has higher variance. This reduces the t-statistic and, therefore, causes underrejection.
@@ -162,7 +164,9 @@ Let's test it:
 
 
 ```{r}
-production_urtest <- ur.df(y = corn_production$production, type = "trend", selectlags = "BIC")
+production_urtest <- ur.df(y = corn_production$production,
+                           type = "trend",
+                           selectlags = "BIC")
 
 summary(production_urtest)
 ```
